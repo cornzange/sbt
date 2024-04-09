@@ -1,0 +1,1 @@
+int err::forbidden() asm "403 PUSHINT";

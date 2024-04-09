@@ -1,22 +1,186 @@
 #include "imports/stdlib.fc";
+#include "imports/opcodes.fc";
+#include "imports/errors.fc";
+#include "imports/params.fc";
+
+(int, int, slice, slice, slice, cell, int) load_data() {
+    slice ds = get_data().begin_parse();
+    int item_id = ds~load_uint(64);
+    slice collection_address = ds~load_msg_addr();
+
+    if (ds.slice_bits() > 0) {
+        slice owner_address = ds~load_msg_addr();
+        slice authority_address = ds~load_msg_addr();
+        cell content = ds~load_ref();
+        int revoked_at = ds~load_uint(64);
+        return (true, item_id, collection_address, owner_address, authority_address, content, revoked_at);
+    } else {  
+        return (false, item_id, collection_address, null(), null(), null(), null()); ;; nft not initialized yet
+    }
+}
+
+() store_data(int item_id, slice collection_address, slice owner_address, slice authority_address, cell content, int revoked_at) impure {
+    set_data(
+        begin_cell()
+            .store_uint(item_id, 64)
+            .store_slice(collection_address)
+            .store_slice(owner_address)
+            .store_slice(authority_address)
+            .store_ref(content)
+            .store_uint(revoked_at, 64)
+            .end_cell()
+    );
+}
+
+() send_msg(int flag, slice to_address, int amount, int op, int query_id, builder payload, int send_mode) impure inline {
+    var body = begin_cell().store_uint(op, 32).store_uint(query_id, 64);
+    if (~ builder_null?(payload)) {
+        body = body.store_builder(payload);
+    }
+
+    var msg = begin_cell()
+            .store_uint(flag, 6)
+            .store_slice(to_address)
+            .store_coins(amount)
+            .store_uint(1, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+            .store_ref(body.end_cell());
+
+    send_raw_message(msg.end_cell(), send_mode);
+}
 
 () recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
-    ;; TODO reject transfer
-    ;; 1) prove_ownership#04ded148 query_id:uint64 dest:MsgAddress forward_payload:^Cell with_content:Bool = InternalMsgBody;
-    ;; a) ownership_proof#0524c7ae query_id:uint64 item_id:uint256 owner:MsgAddress data:^Cell revoked_at:uint64 content:(Maybe ^Cell) = InternalMsgBody;
-    ;; 2) request_owner#d0c3bfea query_id:uint64 dest:MsgAddress forward_payload:^Cell with_content:Bool = InternalMsgBody;
-    ;; b) owner_info#0dd607e3 query_id:uint64 item_id:uint256 initiator:MsgAddress owner:MsgAddress data:^Cell revoked_at:uint64 content:(Maybe ^Cell) = InternalMsgBody;
-    ;; 3) destroy#1f04537a query_id:uint64 = InternalMsgBody;
-    ;; 4) revoke#6f89f5e3 query_id:uint64 = InternalMsgBody;
+    if (in_msg_body.slice_empty?()) { ;; ignore empty messages
+        return ();
+    }
+
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+
+    if (flags & 1) { ;; ignore all bounced messages
+        return ();
+    }
+    slice sender_address = cs~load_msg_addr();
+
+    cs~load_coins(); ;; skip value
+    cs~skip_bits(1); ;; skip extracurrency collection
+    cs~load_coins(); ;; skip ihr_fee
+    int fwd_fee = muldiv(cs~load_coins(), 3, 2); ;; we use message fwd_fee for estimation of forward_payload costs
+
+    (int init?, int item_id, slice collection_address, slice owner_address, slice authority_address, cell content, int revoked_at) = load_data();
+    if (~ init?) {
+        throw_unless(405, equal_slices(collection_address, sender_address));
+        store_data(item_id, collection_address, in_msg_body~load_msg_addr(), in_msg_body~load_ref());
+        return ();
+    }
+    int op = in_msg_body~load_uint(32);
+    int query_id = in_msg_body~load_uint(64);
+    if(op == op::transfer()) {
+        throw(err::forbidden());
+    }
+    if(op == op::prove_ownership()) {
+        ;; 1) prove_ownership#04ded148 query_id:uint64 dest:MsgAddress forward_payload:^Cell with_content:Bool = InternalMsgBody;
+        ;; a) ownership_proof#0524c7ae query_id:uint64 item_id:uint256 owner:MsgAddress data:^Cell revoked_at:uint64 content:(Maybe ^Cell) = InternalMsgBody;
+        slice dest = in_msg_body~load_msg_addr();
+        cell forward_payload = in_msg_body~load_ref();
+        int with_content = in_msg_body~load_uint(8);
+
+        cell body = begin_cell()
+            .store_uint(op::ownership_proof(), 32)
+            .store_uint(query_id,64);; query_id
+            .store_uint(item_id,256);; item_id
+            .store_slice(owner_address);; owner
+            .store_ref(forward_payload);; data
+            .store_uint(revoked_at, 64); ;; revoked_at
+
+        if(with_content == true) {
+            body~store_ref(content);
+        };; content
+
+        body~end_cell();
+
+        cell msg = begin_cell()
+            .store_uint(0x18, 6)
+            .store_slice(dest)
+            .store_coins(0);; check amount
+            .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+            .store_ref(body);
+        send_raw_message(msg.end_cell(), 64);
+    };;
+
+    if (op == op::get_static_data()) {
+        var msg = begin_cell().store_uint(storage::item_id, 256).store_slice(storage::collection_address);
+
+        ;; mode 64 = carry all the remaining value of the inbound message
+        send_msg(flag::regular(), sender_address, 0, op::report_static_data(), query_id, msg, 64);
+        return ();
+    }
+
+    if(op == op::request_owner()) {
+        ;; 2) request_owner#d0c3bfea query_id:uint64 dest:MsgAddress forward_payload:^Cell with_content:Bool = InternalMsgBody;
+        ;; b) owner_info#0dd607e3 query_id:uint64 item_id:uint256 initiator:MsgAddress owner:MsgAddress data:^Cell revoked_at:uint64 content:(Maybe ^Cell) = InternalMsgBody;
+        slice dest = in_msg_body~load_msg_addr();
+        cell forward_payload = in_msg_body~load_ref();
+        int with_content = in_msg_body~load_uint(8);
+
+        cell body = begin_cell()
+            .store_uint(op::owner_info(),32)
+            .store_uint(query_id,64);; query_id
+            .store_uint(item_id,256);; item_id
+            .store_slice(sender_address);; initiator
+            .store_slice(owner_address);; owner
+            .store_ref(forward_payload);; data
+            .store_uint(revoked_at, 64); ;; revoked_at
+
+        if(with_content == true) {
+            body~store_ref(content);
+        };; content
+
+        body~end_cell();
+
+        cell msg = begin_cell()
+            .store_uint(0x18, 6)
+            .store_slice(dest)
+            .store_coins(0)
+            .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+            .store_ref(body);
+        send_raw_message(msg.end_cell(), 64);
+
+        return ();
+    };;
+
+    if(op == op::destroy()) {
+        ;; 3) destroy#1f04537a query_id:uint64 = InternalMsgBody;
+        ;; send_msg excesses#d53276db query_id:uint64 = InternalMsgBody;
+        throw_unless(405, equal_slices(owner_address, sender_address));
+        store_data(item_id,  collection_address,  null(),  null(),  content,  revoked_at);
+        cell body = begin_cell().store_uint(op::excesses()).store_uint(query_id, 64).end_cell();
+        cell msg = begin_cell()
+            .store_uint(0x18, 6)
+            .store_slice(dest)
+            .store_coins(0)
+            .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+            .store_ref(body);
+        send_raw_message(msg.end_cell(), 128);
+    };;
+
+    if(op == op::revoke()){
+        throw_unless(err::forbidden(), equal_slices(authority_address, sender_address));
+        throw_if(err::forbidden(), revoked_at > 0);
+        store_data(item_id,  collection_address,  owner_address,  authority_address,  content,  now());
+    };;
+
+    throw(0xffff);
 }
 
-(int, int, slice, slice, cell) get_nft_data() method_id {
-    (int init?, int index, slice collection_address, slice owner_address, cell content) = load_data();
-    return (init?, index, collection_address, owner_address, content);
+(int, int, slice, slice, slice, cell, int) get_nft_data() method_id {
+    (int init?, int item_id, slice collection_address, slice owner_address, slice authority_address, cell content, int revoked_at) = load_data();
+    return (init?, item_id, collection_address, owner_address, authority_address, content, revoked_at);
 }
 (slice) get_authority_address() {
-    return ();
+    (_, _, _, _, slice authority_address, _, _) = load_data();
+    return (authority_address);
 }
 (int) get_revoked_time() {
-    return();
+    (_, _, _, _, _, _, int revoked_at) = load_data();
+    return(revoked_at);
 }
