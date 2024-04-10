@@ -56,7 +56,23 @@
     slice cs = in_msg_full.begin_parse();
     int flags = cs~load_uint(4);
 
-    if (flags & 1) { ;; ignore all bounced messages
+    if (flags & 1) { ;; route all prove_ownership bounced messages to owner
+        ;; first op was 0xffffffff, because of bounced, now we need to read real one
+        op = in_msg_body~load_uint(32);
+
+        if (op == op::ownership_proof()) {
+            int query_id = in_msg_body~load_uint(64);
+            var body = begin_cell()
+                .store_uint(op::ownership_proof_bounced(),32)
+                .store_uint(query_id, 64);
+            cell msg = begin_cell()
+                .store_uint(flag::regular(), 6)
+                .store_slice(owner_address)
+                .store_coins(0);; check amount
+                .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+                .store_ref(body);
+            send_raw_message(msg.end_cell(), 64);
+        }
         return ();
     }
     slice sender_address = cs~load_msg_addr();
@@ -74,9 +90,11 @@
     }
     int op = in_msg_body~load_uint(32);
     int query_id = in_msg_body~load_uint(64);
+    
     if(op == op::transfer()) {
         throw(err::forbidden());
     }
+
     if(op == op::prove_ownership()) {
         ;; 1) prove_ownership#04ded148 query_id:uint64 dest:MsgAddress forward_payload:^Cell with_content:Bool = InternalMsgBody;
         ;; a) ownership_proof#0524c7ae query_id:uint64 item_id:uint256 owner:MsgAddress data:^Cell revoked_at:uint64 content:(Maybe ^Cell) = InternalMsgBody;
@@ -105,15 +123,24 @@
             .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
             .store_ref(body);
         send_raw_message(msg.end_cell(), 64);
-    };;
+        return();
+    }
 
     if (op == op::get_static_data()) {
-        var msg = begin_cell().store_uint(storage::item_id, 256).store_slice(storage::collection_address);
-
-        ;; mode 64 = carry all the remaining value of the inbound message
-        send_msg(flag::regular(), sender_address, 0, op::report_static_data(), query_id, msg, 64);
+        var body = begin_cell()
+            .store_uint(op::report_static_data(),32)
+            .store_uint(query_id, 64)
+            .store_uint(item_id, 256)
+            .store_slice(collection_address);
+        cell msg = begin_cell()
+            .store_uint(flag::regular(), 6)
+            .store_slice(sender_address)
+            .store_coins(0);; check amount
+            .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+            .store_ref(body);
+        send_raw_message(msg.end_cell(), 64);
         return ();
-    }
+    } 
 
     if(op == op::request_owner()) {
         ;; 2) request_owner#d0c3bfea query_id:uint64 dest:MsgAddress forward_payload:^Cell with_content:Bool = InternalMsgBody;
@@ -146,7 +173,7 @@
         send_raw_message(msg.end_cell(), 64);
 
         return ();
-    };;
+    }
 
     if(op == op::destroy()) {
         ;; 3) destroy#1f04537a query_id:uint64 = InternalMsgBody;
@@ -156,18 +183,37 @@
         cell body = begin_cell().store_uint(op::excesses()).store_uint(query_id, 64).end_cell();
         cell msg = begin_cell()
             .store_uint(0x18, 6)
-            .store_slice(dest)
+            .store_slice(owner_address)
             .store_coins(0)
             .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
             .store_ref(body);
         send_raw_message(msg.end_cell(), 128);
-    };;
+        return();
+    }
 
     if(op == op::revoke()){
         throw_unless(err::forbidden(), equal_slices(authority_address, sender_address));
         throw_if(err::forbidden(), revoked_at > 0);
         store_data(item_id,  collection_address,  owner_address,  authority_address,  content,  now());
-    };;
+        return();
+    }
+
+    if (op == op::take_excess()) {
+        throw_unless(401, equal_slices(owner_address, sender_address));
+
+        ;; reserve amount for storage
+        raw_reserve(min_tons_for_storage(), 0);
+
+        cell body = begin_cell().store_uint(op::excesses()).store_uint(query_id, 64).end_cell();
+        cell msg = begin_cell()
+            .store_uint(flag::regular(), 6)
+            .store_slice(owner_address)
+            .store_coins(0)
+            .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+            .store_ref(body);
+        send_raw_message(msg.end_cell(), 128);
+        return ();
+    }
 
     throw(0xffff);
 }

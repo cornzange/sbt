@@ -16,20 +16,16 @@ int name_dict_index() asm "59089242681608890680090686026688704441792375738894456
         ds~load_uint(64), ;; next_item_index
         ds~load_ref(), ;; content
         ds~load_ref(), ;; nft_item_code
-        ds~load_ref(), ;; nft_link_code
-        ds~load_ref(),  ;; royalty_params
         ds~load_uint(256)  ;; public_key
     );
 }
 
-() save_data(slice owner_address, int next_item_index, cell content, cell nft_item_code, cell nft_link_code, cell royalty_params, int public_key) impure inline {
+() save_data(slice owner_address, int next_item_index, cell content, cell nft_item_code, int public_key) impure inline {
     set_data(begin_cell()
     .store_slice(owner_address)
     .store_uint(next_item_index, 64)
     .store_ref(content)
     .store_ref(nft_item_code)
-    .store_ref(nft_link_code)
-    .store_ref(royalty_params)
     .store_uint(public_key, 256)
     .end_cell());
 }
@@ -75,7 +71,7 @@ slice calculate_item_address(int wc, cell state_init) {
 
 (int) get_rest_amount(int amount) inline {
     int nft_deploy_amount = min_tons_for_image() + min_tons_for_storage() + transfer_gas();
-    int result  = amount - link_deploy_amount - nft_deploy_amount - compute_fee();
+    int result  = amount - nft_deploy_amount - compute_fee();
     dump_stack();
     return (result);
 }
@@ -98,7 +94,7 @@ slice calculate_item_address(int wc, cell state_init) {
     int op = in_msg_body~load_uint(32);
     int query_id = in_msg_body~load_uint(64);
 
-    var (owner_address, next_item_index, content, nft_item_code, nft_link_code, royalty_params, public_key) = load_data();
+    var (owner_address, next_item_index, content, nft_item_code, public_key) = load_data();
     
     ;; new_nft#1 query_id:uint64 signature:bits512 amount: (VarUInteger 16) ^[ onchain_prefix: int8 nft_content: dict ] = ExtInMsgBody
     ;; new_owner#3 query_id:uint64 signature:bits512 amount: (VarUInteger 16) address: MsgAddr = ExtInMsgBody
@@ -118,14 +114,14 @@ slice calculate_item_address(int wc, cell state_init) {
         send_cashback(sender_address, rest_amount);
 
         next_item_index += 1;
-        save_data(owner_address, next_item_index, content, nft_item_code, nft_link_code, royalty_params, public_key);
+        save_data(owner_address, next_item_index, content, nft_item_code, public_key);
         return ();
     }
 
     if (op == 3) { ;; change owner
         slice new_owner = in_msg_body~load_msg_addr();
         throw_unless(err::wrong_signature(), check_signature(slice_hash(new_owner), signature, public_key));
-        save_data(new_owner, next_item_index, content, nft_item_code,nft_link_code, royalty_params, public_key);
+        save_data(new_owner, next_item_index, content, nft_item_code, public_key);
         return ();
     }
     throw(0xffff);
@@ -142,13 +138,6 @@ slice calculate_item_address(int wc, cell state_init) {
 slice get_nft_address_by_index(int index) method_id {
     var (_, _, _, nft_item_code, _, _, _) = load_data();
     cell state_init = calculate_item_state_init(index, nft_item_code);
-    return calculate_item_address(workchain(), state_init);
-}
-
-slice get_nft_link_address(slice hex) method_id {
-    var (_, _, _, _, nft_link_code, _, _) = load_data();
-    int hex_index = slice_hash(hex);
-    cell state_init = calculate_item_state_init(hex_index, nft_link_code);
     return calculate_item_address(workchain(), state_init);
 }
 
