@@ -1,1 +1,2 @@
 int err::forbidden() asm "403 PUSHINT";
+int err::not_enough_money() asm "400 PUSHINT";

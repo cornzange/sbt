@@ -11,7 +11,7 @@ int compute_fee() asm "5000000 PUSHINT"; ;; 0.005 TON
 (slice, int, cell, cell) load_data() inline {
     var ds = get_data().begin_parse();
     return 
-    (ds~load_msg_addr(), ;; owner_address
+    (   ds~load_msg_addr(), ;; owner_address
         ds~load_uint(64), ;; next_item_index
         ds~load_ref(), ;; content
         ds~load_ref() ;; sbt_item_code
@@ -28,7 +28,7 @@ int compute_fee() asm "5000000 PUSHINT"; ;; 0.005 TON
 }
 
 cell calculate_item_state_init(int item_index, cell sbt_item_code) {
-    cell data = begin_cell().store_uint(item_index, 256).store_slice(my_address()).end_cell();
+    cell data = begin_cell().store_uint(item_index, 64).store_slice(my_address()).end_cell();
     return begin_cell().store_uint(0, 2).store_dict(sbt_item_code).store_dict(data).store_uint(0, 1).end_cell();
 }
 
@@ -40,17 +40,25 @@ slice calculate_item_address(int wc, cell state_init) {
                      .begin_parse();
 }
 
-() deploy_sbt_item(int item_index, cell sbt_item_code, int amount, cell sbt_content, slice creator_address) impure {
+() deploy_sbt_item(int item_index, cell sbt_item_code, cell sbt_content, slice owner_address, slice authority_address) impure {
     cell state_init = calculate_item_state_init(item_index, sbt_item_code);
     slice sbt_address = calculate_item_address(workchain(), state_init);
-    cell body = begin_cell().store_uint(op::init_sbt(), 32).store_slice(creator_address).store_ref(state_init).end_cell();
+
+    cell body = begin_cell()
+        .store_uint(op::init_sbt(), 32)
+        .store_slice(owner_address)
+        .store_slice(authority_address)
+        .store_ref(sbt_content)
+        .end_cell();
+
     var msg = begin_cell()
             .store_uint(0x18, 6)
             .store_slice(sbt_address)
-            .store_coins(amount)
+            .store_coins(min_tons_for_storage())
             .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
             .store_ref(state_init)
             .store_ref(body);
+
     send_raw_message(msg.end_cell(), 1); ;; pay transfer fees separately, revert on errors
 }
 
@@ -89,20 +97,20 @@ slice calculate_item_address(int wc, cell state_init) {
     int op = in_msg_body~load_uint(32);
     int query_id = in_msg_body~load_uint(64);
 
-    var (owner_address, next_item_index, content, sbt_item_code, public_key) = load_data();
+    var (owner_address, next_item_index, content, sbt_item_code) = load_data();
     
-    ;; new_sbt#1 query_id:uint64 signature:bits512 amount: (VarUInteger 16) ^[ onchain_prefix: int8 sbt_content: dict ] = ExtInMsgBody
+    ;; new_sbt#1 query_id:uint64 sbt_owner: MsgAddr ^[ onchain_prefix: int8 sbt_content: dict ] = ExtInMsgBody
     ;; new_owner#3 query_id:uint64 signature:bits512 amount: (VarUInteger 16) address: MsgAddr = ExtInMsgBody
-    
-    slice signature = in_msg_body~load_bits(512);
-    throw_unless(err::forbidden(), equal_slices(owner_address, sender_address));
 
+    throw_unless(err::forbidden(), equal_slices(owner_address, sender_address));
     if (op == 1) { ;; deploy new sbt
+        slice sbt_owner = in_msg_body~load_msg_addr();
+        slice sbt_authority = in_msg_body~load_msg_addr();
         cell sbt_content = in_msg_body~load_ref();
         int rest_amount = get_rest_amount(msg_value);
         throw_if(err::not_enough_money(), rest_amount <= 0);
 
-        deploy_sbt_item(next_item_index, sbt_item_code, min_tons_for_storage(), sbt_content, sender_address);
+        deploy_sbt_item(next_item_index, sbt_item_code, sbt_content, sbt_owner, sbt_authority);
         send_cashback(sender_address, rest_amount);
 
         next_item_index += 1;
@@ -126,15 +134,19 @@ slice calculate_item_address(int wc, cell state_init) {
     return (next_item_index, cs~load_ref(), owner_address);
 }
 
-slice get_sbt_address_by_index(int index) method_id {
+slice get_nft_address_by_index(int index) method_id {
     var (_, _, _, sbt_item_code) = load_data();
     cell state_init = calculate_item_state_init(index, sbt_item_code);
     return calculate_item_address(workchain(), state_init);
 }
 
-cell get_sbt_content(int index, cell individual_sbt_content) method_id {
+cell get_nft_content(int index, cell individual_sbt_content) method_id {
+    var (_, _, content, _) = load_data();
+    slice cs = content.begin_parse();
+    cell common_content = cs~load_ref();
     return (begin_cell()
-                      .store_uint(0, 8) ;; onchain tag
+                      .store_uint(1, 8) ;; offchain tag
+                      .store_slice(common_content.begin_parse())
                       .store_ref(individual_sbt_content)
           .end_cell());
 }
